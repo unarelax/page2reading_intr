@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>打扫一下 · Page2Reading</title>
+  <style>
+    :root {
+      --ink: #1c1915;
+      --muted: #6b645c;
+      --paper: #f4efe6;
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; height: 100%; }
+    body {
+      font-family: "Iowan Old Style", "Palatino Linotype", Palatino, "Songti SC", serif;
+      background:
+        radial-gradient(1200px 700px at 12% -10%, #fff8e8 0%, transparent 55%),
+        radial-gradient(900px 500px at 100% 0%, #f3e4c8 0%, transparent 45%),
+        var(--paper);
+      color: var(--ink);
+    }
+    .page {
+      min-height: 100%;
+      display: grid;
+      place-items: center;
+      padding: 28px 18px 40px;
+    }
+    .stage-wrap { width: min(1080px, 100%); }
+    .caption {
+      display: flex;
+      justify-content: space-between;
+      align-items: baseline;
+      gap: 16px;
+      margin-bottom: 12px;
+    }
+    .caption h1 {
+      margin: 0;
+      font-size: 22px;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+    }
+    .caption p {
+      margin: 0;
+      color: var(--muted);
+      font-size: 13px;
+    }
+    .stage {
+      position: relative;
+      background: #111;
+      border-radius: 18px;
+      overflow: hidden;
+      box-shadow:
+        0 1px 0 rgba(255,255,255,.7) inset,
+        0 18px 50px rgba(60, 40, 12, .18);
+      aspect-ratio: 16 / 10;
+      cursor: pointer;
+    }
+    canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      position: relative;
+      z-index: 0;
+    }
+    .ui { position: absolute; z-index: 2; }
+    .cta {
+      left: 50%;
+      top: 50%;
+      transform: translate(-50%, -50%) scale(1);
+      width: 124px;
+      height: 124px;
+      border: 0;
+      border-radius: 50%;
+      background: rgba(255, 250, 242, .94);
+      box-shadow:
+        0 12px 32px rgba(0,0,0,.3),
+        0 0 0 10px rgba(255,250,242,.38);
+      cursor: pointer;
+      display: grid;
+      place-items: center;
+      padding: 10px;
+      transition: opacity .2s ease, transform .2s ease;
+    }
+    .cta img {
+      width: 92px;
+      height: 92px;
+      object-fit: contain;
+      filter: drop-shadow(0 4px 8px rgba(0,0,0,.18));
+    }
+    .stage.is-hover:not(.is-busy):not(.is-clean) .cta {
+      transform: translate(-50%, -50%) scale(1.06);
+    }
+    .stage.is-busy .cta,
+    .stage.is-clean .cta {
+      opacity: 0;
+      pointer-events: none;
+    }
+    .cta.is-sweeping {
+      opacity: 1 !important;
+      pointer-events: none;
+      background: transparent;
+      box-shadow: none;
+      width: 132px;
+      height: 132px;
+    }
+    .again {
+      right: 14px;
+      top: 14px;
+      border: 0;
+      border-radius: 999px;
+      padding: 8px 12px;
+      background: rgba(255,250,242,.94);
+      color: var(--ink);
+      font: inherit;
+      font-size: 12px;
+      cursor: pointer;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity .2s ease;
+    }
+    .again.is-on { opacity: 1; pointer-events: auto; }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <div class="stage-wrap">
+      <div class="caption">
+        <h1>把网页扫成 PDF</h1>
+        <p>点中间的扫帚，立刻开始打扫</p>
+      </div>
+      <div class="stage" id="stage">
+        <canvas id="view"></canvas>
+        <button class="ui cta" id="cta" type="button" aria-label="开始打扫">
+          <img id="cta-img" alt="" src="icon/main_logo.png" />
+        </button>
+        <button class="ui again" id="again" type="button">再扫一次</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.170.0/build/three.module.js"
+      }
+    }
+  </script>
+  <script type="module">
+    import * as THREE from "three";
+
+    const ICON_SRC = "icon/main_logo.png";
+    const ICON_FALLBACK = "icon/tape-motif-broom.png";
+    const stage = document.getElementById("stage");
+    const canvas = document.getElementById("view");
+    const cta = document.getElementById("cta");
+    const again = document.getElementById("again");
+
+    let busy = false;
+    let ready = false;
+    let pendingStart = false;
+    let anim = null;
+    let startClean = () => {
+      pendingStart = true;
+    };
+
+    stage.addEventListener("mouseenter", () => stage.classList.add("is-hover"));
+    stage.addEventListener("mouseleave", () => {
+      if (!busy) stage.classList.remove("is-hover");
+    });
+    stage.addEventListener("click", (e) => {
+      if (e.target === again) return;
+      startClean();
+    });
+    again.addEventListener("click", (e) => {
+      e.stopPropagation();
+    });
+
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: false });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+    renderer.setClearColor(0x111111, 1);
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.OrthographicCamera(-1, 1, 1, -1, 0.1, 10);
+    camera.position.z = 3;
+
+    const assetURL = (rel) => new URL(rel, import.meta.url).href;
+
+    const loader = new THREE.TextureLoader();
+    loader.crossOrigin = "";
+    const loadTex = (rel) =>
+      new Promise((resolve, reject) => {
+        loader.load(
+          assetURL(rel),
+          (tex) => {
+            tex.colorSpace = THREE.SRGBColorSpace;
+            tex.minFilter = THREE.LinearFilter;
+            tex.magFilter = THREE.LinearFilter;
+            resolve(tex);
+          },
+          undefined,
+          () => reject(new Error(`Failed to load ${rel}`))
+        );
+      });
+
+    const loadTexSafe = (url, fallback) =>
+      loadTex(url).catch(() => {
+        if (!fallback || fallback === url) {
+          throw new Error(`Failed to load ${url}`);
+        }
+        return loadTex(fallback);
+      });
+
+    function keyBlack(tex) {
+      const img = tex.image;
+      const cnv = document.createElement("canvas");
+      cnv.width = img.width;
+      cnv.height = img.height;
+      const ctx = cnv.getContext("2d");
+      ctx.drawImage(img, 0, 0);
+      const data = ctx.getImageData(0, 0, cnv.width, cnv.height);
+      const p = data.data;
+      for (let i = 0; i < p.length; i += 4) {
+        const m = Math.max(p[i], p[i + 1], p[i + 2]);
+        if (m < 28) p[i + 3] = 0;
+        else if (m < 64) p[i + 3] = Math.round(p[i + 3] * ((m - 28) / 36));
+      }
+      ctx.putImageData(data, 0, 0);
+      const keyed = new THREE.CanvasTexture(cnv);
+      keyed.colorSpace = THREE.SRGBColorSpace;
+      keyed.minFilter = THREE.LinearFilter;
+      keyed.magFilter = THREE.LinearFilter;
+      keyed.needsUpdate = true;
+      tex.dispose();
+      return keyed;
+    }
+
+    const ctaImg = document.getElementById("cta-img");
+    ctaImg.addEventListener("error", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      if (!ctaImg.dataset.fallback) {
+        ctaImg.dataset.fallback = "1";
+        ctaImg.src = assetURL(ICON_FALLBACK);
+      }
+    });
+
+    const [dirtyTex, cleanTex, iconRaw] = await Promise.all([
+      loadTex("photo/对比1-网页.png"),
+      loadTex("photo/对比1-PDF.png"),
+      loadTexSafe(ICON_SRC, ICON_FALLBACK),
+    ]);
+    const iconTex = keyBlack(iconRaw);
+    const iconDataURL = iconTex.image && iconTex.image.toDataURL
+      ? iconTex.image.toDataURL("image/png")
+      : assetURL(ICON_SRC);
+    ctaImg.src = iconDataURL;
+
+    const imgW = dirtyTex.image.width;
+    const imgH = dirtyTex.image.height;
+    stage.style.aspectRatio = `${imgW} / ${imgH}`;
+
+    const MASK = 1024;
+    const maskCanvas = document.createElement("canvas");
+    maskCanvas.width = MASK;
+    maskCanvas.height = MASK;
+    const maskCtx = maskCanvas.getContext("2d");
+    maskCtx.fillStyle = "#000";
+    maskCtx.fillRect(0, 0, MASK, MASK);
+    const maskTex = new THREE.CanvasTexture(maskCanvas);
+    maskTex.minFilter = THREE.LinearFilter;
+    maskTex.magFilter = THREE.LinearFilter;
+
+    const uniforms = {
+      dirtyMap: { value: dirtyTex },
+      cleanMap: { value: cleanTex },
+      maskMap: { value: maskTex },
+      sheen: { value: 0 },
+      sheenX: { value: -0.2 },
+      sparkleAmp: { value: 0 },
+      glow: { value: 0 },
+      time: { value: 0 },
+    };
+
+    const pageMat = new THREE.ShaderMaterial({
+      uniforms,
+      vertexShader: `
+        varying vec2 vUv;
+        void main() {
+          vUv = uv;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+        }
+      `,
+      fragmentShader: `
+        uniform sampler2D dirtyMap;
+        uniform sampler2D cleanMap;
+        uniform sampler2D maskMap;
+        uniform float sheen;
+        uniform float sheenX;
+        uniform float sparkleAmp;
+        uniform float glow;
+        uniform float time;
+        varying vec2 vUv;
+
+        float hash(vec2 p) {
+          return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);
+        }
+
+        void main() {
+          float m = texture2D(maskMap, vUv).r;
+          vec4 dirty = texture2D(dirtyMap, vUv);
+          vec4 clean = texture2D(cleanMap, vUv);
+          vec4 col = mix(dirty, clean, clamp(m, 0.0, 1.0));
+
+          col.rgb += vec3(1.0, 0.96, 0.78) * glow * m * 0.22;
+
+          float band = smoothstep(0.14, 0.0, abs(vUv.x - sheenX - (vUv.y - 0.5) * 0.22));
+          float band2 = smoothstep(0.05, 0.0, abs(vUv.x - sheenX - (vUv.y - 0.5) * 0.22));
+          col.rgb += vec3(1.0, 0.97, 0.8) * (band * 0.55 + band2) * sheen * m;
+
+          vec2 g = vUv * vec2(42.0, 28.0);
+          vec2 id = floor(g);
+          vec2 f = fract(g) - 0.5;
+          float n = hash(id + floor(time * 2.0));
+          float star = 0.0;
+          if (n > 0.82) {
+            float d = length(f);
+            float cross = smoothstep(0.07, 0.0, abs(f.x)) * smoothstep(0.38, 0.0, abs(f.y));
+            cross += smoothstep(0.07, 0.0, abs(f.y)) * smoothstep(0.38, 0.0, abs(f.x));
+            star = (smoothstep(0.42, 0.0, d) * 0.5 + cross) * (n - 0.82) * 6.0;
+            star *= 0.55 + 0.45 * sin(time * 16.0 + n * 40.0);
+          }
+          col.rgb += vec3(1.0, 0.98, 0.86) * star * sparkleAmp * m;
+
+          gl_FragColor = col;
+        }
+      `,
+    });
+
+    const page = new THREE.Mesh(new THREE.PlaneGeometry(2, 2), pageMat);
+    scene.add(page);
+
+    function makePoints(count, sizeMin, sizeMax, color) {
+      const geo = new THREE.BufferGeometry();
+      const pos = new Float32Array(count * 3);
+      const seed = new Float32Array(count);
+      for (let i = 0; i < count; i++) seed[i] = Math.random();
+      geo.setAttribute("position", new THREE.BufferAttribute(pos, 3));
+      geo.setAttribute("seed", new THREE.BufferAttribute(seed, 1));
+      const mat = new THREE.ShaderMaterial({
+        transparent: true,
+        depthTest: false,
+        blending: THREE.AdditiveBlending,
+        uniforms: {
+          uTime: { value: 0 },
+          uAmp: { value: 0 },
+          uColor: { value: new THREE.Color(color) },
+          uSize: { value: new THREE.Vector2(sizeMin, sizeMax) },
+        },
+        vertexShader: `
+          attribute float seed;
+          uniform float uTime;
+          uniform float uAmp;
+          uniform vec2 uSize;
+          varying float vA;
+          void main() {
+            vec3 p = position;
+            p.x += sin(uTime * 4.0 + seed * 14.0) * 0.018;
+            p.y += 0.03 * uAmp * seed + cos(uTime * 3.0 + seed * 11.0) * 0.012;
+            vA = uAmp * (0.25 + 0.75 * abs(sin(uTime * 9.0 + seed * 20.0)));
+            vec4 mv = modelViewMatrix * vec4(p, 1.0);
+            gl_PointSize = mix(uSize.x, uSize.y, seed) * (0.6 + uAmp);
+            gl_Position = projectionMatrix * mv;
+          }
+        `,
+        fragmentShader: `
+          uniform vec3 uColor;
+          varying float vA;
+          void main() {
+            vec2 p = gl_PointCoord - 0.5;
+            float d = length(p);
+            float core = smoothstep(0.5, 0.0, d);
+            float cross = smoothstep(0.07, 0.0, abs(p.x)) * smoothstep(0.42, 0.0, abs(p.y));
+            cross += smoothstep(0.07, 0.0, abs(p.y)) * smoothstep(0.42, 0.0, abs(p.x));
+            float a = (core * 0.55 + cross) * vA;
+            if (a < 0.04) discard;
+            gl_FragColor = vec4(uColor, a);
+          }
+        `,
+      });
+      const pts = new THREE.Points(geo, mat);
+      pts.frustumCulled = false;
+      scene.add(pts);
+      return { geo, pos, mat, pts, count };
+    }
+
+    const sparkles = makePoints(140, 8, 18, 0xfff4c2);
+    const dust = makePoints(70, 3, 8, 0xc8bba4);
+
+    let planeW = 2;
+    let planeH = 2;
+    const clock = new THREE.Clock();
+
+    function fit() {
+      const w = stage.clientWidth;
+      const h = stage.clientHeight;
+      renderer.setSize(w, h, false);
+      const viewAspect = w / h;
+      const imgAspect = imgW / imgH;
+      if (viewAspect > imgAspect) {
+        planeH = 2;
+        planeW = (2 * imgAspect) / viewAspect;
+      } else {
+        planeW = 2;
+        planeH = (2 * viewAspect) / imgAspect;
+      }
+      page.scale.set(planeW / 2, planeH / 2, 1);
+    }
+    fit();
+    window.addEventListener("resize", fit);
+
+    function uvToWorld(u, v, z = 0.45) {
+      return new THREE.Vector3((u - 0.5) * planeW, (v - 0.5) * planeH, z);
+    }
+
+    function uvToCss(u, v) {
+      const w = uvToWorld(u, v);
+      return {
+        x: ((w.x + 1) / 2) * stage.clientWidth,
+        y: ((1 - w.y) / 2) * stage.clientHeight,
+      };
+    }
+
+    function placeIcon(u, v, rot) {
+      const { x, y } = uvToCss(u, v);
+      cta.hidden = false;
+      cta.classList.add("is-sweeping");
+      cta.style.left = `${x}px`;
+      cta.style.top = `${y}px`;
+      cta.style.transform = `translate(-50%, -50%) rotate(${rot}rad)`;
+    }
+
+    function resetIcon() {
+      cta.classList.remove("is-sweeping");
+      cta.style.left = "";
+      cta.style.top = "";
+      cta.style.transform = "";
+      cta.hidden = false;
+    }
+
+    function stamp(u, v, radius, strength) {
+      const x = u * MASK;
+      const y = (1 - v) * MASK;
+      const r = radius * MASK;
+      const g = maskCtx.createRadialGradient(x, y, 0, x, y, r);
+      g.addColorStop(0, `rgba(255,255,255,${strength})`);
+      g.addColorStop(0.55, `rgba(255,255,255,${strength * 0.45})`);
+      g.addColorStop(1, "rgba(255,255,255,0)");
+      maskCtx.globalCompositeOperation = "lighter";
+      maskCtx.fillStyle = g;
+      maskCtx.beginPath();
+      maskCtx.arc(x, y, r, 0, Math.PI * 2);
+      maskCtx.fill();
+      maskTex.needsUpdate = true;
+    }
+
+    function resetMask() {
+      maskCtx.globalCompositeOperation = "source-over";
+      maskCtx.fillStyle = "#000";
+      maskCtx.fillRect(0, 0, MASK, MASK);
+      maskTex.needsUpdate = true;
+      uniforms.sheen.value = 0;
+      uniforms.sparkleAmp.value = 0;
+      uniforms.glow.value = 0;
+      sparkles.mat.uniforms.uAmp.value = 0;
+      dust.mat.uniforms.uAmp.value = 0;
+    }
+
+    function makeBroomPath() {
+      const pts = [];
+      for (let row = 0; row < 8; row++) {
+        const v = 0.94 - row * 0.115;
+        if (row % 2 === 0) for (let i = 0; i <= 12; i++) pts.push({ u: 0.05 + i * 0.075, v });
+        else for (let i = 12; i >= 0; i--) pts.push({ u: 0.05 + i * 0.075, v });
+      }
+      return pts;
+    }
+
+    function lerpPath(pts, t) {
+      const p = t * (pts.length - 1);
+      const i = Math.min(Math.floor(p), pts.length - 2);
+      const f = p - i;
+      return {
+        u: pts[i].u + (pts[i + 1].u - pts[i].u) * f,
+        v: pts[i].v + (pts[i + 1].v - pts[i].v) * f,
+      };
+    }
+
+    function placeCloud(cloud, cx, cy, spread) {
+      for (let i = 0; i < cloud.count; i++) {
+        cloud.pos[i * 3] = cx + (Math.random() - 0.5) * spread * planeW;
+        cloud.pos[i * 3 + 1] = cy + (Math.random() - 0.5) * spread * planeH;
+        cloud.pos[i * 3 + 2] = 0.55;
+      }
+      cloud.geo.attributes.position.needsUpdate = true;
+    }
+
+    startClean = function startCleanNow() {
+      if (busy) return;
+      if (!ready) {
+        pendingStart = true;
+        return;
+      }
+      pendingStart = false;
+      busy = true;
+      stage.classList.add("is-busy");
+      stage.classList.remove("is-clean");
+      again.classList.remove("is-on");
+      resetMask();
+      const path = makeBroomPath();
+      placeIcon(path[0].u, path[0].v, 0);
+      anim = {
+        t0: performance.now(),
+        duration: 2600,
+        path,
+        phase: "sweep",
+        lastU: path[0].u,
+        lastV: path[0].v,
+      };
+    };
+
+    function finishReset() {
+      resetMask();
+      again.classList.remove("is-on");
+      busy = false;
+      resetIcon();
+      stage.classList.remove("is-busy", "is-clean");
+    }
+
+    again.addEventListener("click", (e) => {
+      e.stopPropagation();
+      finishReset();
+    });
+
+    ready = true;
+    if (pendingStart) startClean();
+
+    function tick() {
+      const t = clock.getElapsedTime();
+      uniforms.time.value = t;
+      sparkles.mat.uniforms.uTime.value = t;
+      dust.mat.uniforms.uTime.value = t;
+
+      if (anim) {
+        const now = performance.now();
+        if (anim.phase === "sweep") {
+          const k = Math.min(1, (now - anim.t0) / anim.duration);
+          const ease = 1 - Math.pow(1 - k, 1.2);
+          const p = lerpPath(anim.path, ease);
+          const w = uvToWorld(p.u, p.v);
+          const look = lerpPath(anim.path, Math.min(1, ease + 0.018));
+          const ang = Math.atan2(look.v - p.v, look.u - p.u);
+          placeIcon(p.u, p.v, ang - 0.7 + Math.sin(k * 28) * 0.12);
+          stamp(p.u, p.v, 0.16, 0.62);
+          stamp((p.u + anim.lastU) / 2, (p.v + anim.lastV) / 2, 0.14, 0.4);
+          anim.lastU = p.u;
+          anim.lastV = p.v;
+          placeCloud(dust, w.x, w.y, 0.12);
+          dust.mat.uniforms.uAmp.value = 0.7;
+          sparkles.mat.uniforms.uAmp.value = 0.35;
+          placeCloud(sparkles, w.x, w.y, 0.18);
+          uniforms.sparkleAmp.value = 0.25 * k;
+
+          if (k >= 1) {
+            maskCtx.globalCompositeOperation = "source-over";
+            maskCtx.fillStyle = "#fff";
+            maskCtx.fillRect(0, 0, MASK, MASK);
+            maskTex.needsUpdate = true;
+            anim.phase = "bling";
+            anim.t0 = now;
+            for (let i = 0; i < sparkles.count; i++) {
+              sparkles.pos[i * 3] = (Math.random() - 0.5) * planeW * 0.92;
+              sparkles.pos[i * 3 + 1] = (Math.random() - 0.5) * planeH * 0.92;
+              sparkles.pos[i * 3 + 2] = 0.55;
+            }
+            sparkles.geo.attributes.position.needsUpdate = true;
+            sparkles.mat.uniforms.uAmp.value = 1.2;
+            uniforms.sparkleAmp.value = 1.15;
+            uniforms.sheen.value = 1.25;
+            uniforms.glow.value = 1;
+            resetIcon();
+            cta.hidden = true;
+            dust.mat.uniforms.uAmp.value = 0;
+          }
+        } else if (anim.phase === "bling") {
+          const k = Math.min(1, (now - anim.t0) / 1600);
+          uniforms.sheenX.value = -0.2 + k * 1.4;
+          uniforms.sheen.value = 1.35 * Math.sin(k * Math.PI);
+          uniforms.glow.value = Math.sin(k * Math.PI);
+          uniforms.sparkleAmp.value = 1.1 * (1 - k * 0.45);
+          sparkles.mat.uniforms.uAmp.value = Math.max(0, 1.15 * (1 - k));
+          if (k >= 1) {
+            uniforms.sheen.value = 0;
+            uniforms.glow.value = 0.08;
+            uniforms.sparkleAmp.value = 0.12;
+            sparkles.mat.uniforms.uAmp.value = 0.08;
+            anim = null;
+            busy = false;
+            stage.classList.remove("is-busy");
+            stage.classList.add("is-clean");
+            again.classList.add("is-on");
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+      requestAnimationFrame(tick);
+    }
+    tick();
+  </script>
+</body>
+</html>
